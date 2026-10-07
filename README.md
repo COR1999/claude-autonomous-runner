@@ -129,9 +129,10 @@ project folder.
 - A zone in the reset message such as `(Europe/Dublin)` is honoured under pwsh
   7. Windows PowerShell 5.1 cannot resolve those names, so there the time is
   read as machine-local: keep the machine on your account's zone, or use pwsh.
-- On Windows the turn timeout needs `claude.exe` (the native installer). An npm
-  `.cmd` shim still works but its turns are not timed out. Elsewhere any
-  executable `claude` is timed out.
+- An npm install's `claude.cmd` / `claude.ps1` shim is resolved to the
+  `claude.exe` it launches, so it gets the same timeout and cleanup as the native
+  installer. A shim the runner cannot see through still works, but its turns
+  are not timed out.
 - Resumes whatever session was **last active in that folder** — nothing else.
 - The machine must stay powered on. Asleep mid-run just pauses it.
 - It will happily burn your entire remaining quota on the task you give it.

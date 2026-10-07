@@ -34,6 +34,7 @@ if (-not $claude) {
     $claude = [IO.Path]::Combine([Environment]::GetFolderPath('UserProfile'), '.local', 'bin', $(if ($onWindows) { 'claude.exe' } else { 'claude' }))
 }
 if (-not (Test-Path -LiteralPath $claude)) { throw "claude executable not found: $claude" }
+$claude = Resolve-ClaudeExecutable $claude
 
 function Write-RunnerLog([string]$Message) {
     Add-Content -LiteralPath $logFile -Encoding UTF8 -Value ("[{0}] {1}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Message)
@@ -45,7 +46,7 @@ function Invoke-ClaudeTurn {
     $extension = [IO.Path]::GetExtension($claude).ToLowerInvariant()
     $isBinary = if ($onWindows) { $extension -eq '.exe' } else { $extension -ne '.ps1' }
     if (-not $isBinary) {
-        # npm installs on Windows expose claude as a .cmd/.ps1 shim, which
+        # A .cmd/.ps1 that Resolve-ClaudeExecutable could not see through
         # cannot be started (and killed) as a bare process; run it without a
         # timeout.
         $text = & $claude @claudeArgs 2>&1 | Out-String

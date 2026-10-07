@@ -308,4 +308,31 @@ function Format-TurnSummary {
     $parts -join ' | '
 }
 
-Export-ModuleMember -Function ConvertTo-WindowsArgument, ConvertFrom-TurnOutput, Test-DoneSignal, Test-LimitMessage, Get-TurnOutcome, Get-LimitResetTime, Format-TurnSummary
+function Resolve-ClaudeExecutable {
+    <#
+    .SYNOPSIS
+    Sees through an npm shim to the native executable it launches.
+
+    .DESCRIPTION
+    npm exposes package binaries on Windows as claude.cmd / claude.ps1 shims.
+    Current @anthropic-ai/claude-code ships bin/claude.exe, so the shim only
+    runs that exe; launching it directly lets the runner time out, job-attach
+    and drain the turn like any native install. Anything that does not look
+    like such a shim, or whose target is missing, is returned unchanged.
+    #>
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $extension = [IO.Path]::GetExtension($Path).ToLowerInvariant()
+    if ($extension -notin '.cmd', '.ps1') { return $Path }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $Path }
+
+    # cmd-shim writes "%dp0%\<relative>.exe" (.cmd) or "$basedir/<relative>.exe" (.ps1).
+    $match = [regex]::Match([IO.File]::ReadAllText($Path), '(?:%dp0%|\$basedir)[\\/]+(?<rel>[^"%$]+?\.exe)"')
+    if (-not $match.Success) { return $Path }
+
+    $target = Join-Path (Split-Path -Parent $Path) $match.Groups['rel'].Value
+    if (Test-Path -LiteralPath $target -PathType Leaf) { return (Resolve-Path -LiteralPath $target).ProviderPath }
+    $Path
+}
+
+Export-ModuleMember -Function ConvertTo-WindowsArgument, ConvertFrom-TurnOutput, Test-DoneSignal, Test-LimitMessage, Get-TurnOutcome, Get-LimitResetTime, Format-TurnSummary, Resolve-ClaudeExecutable

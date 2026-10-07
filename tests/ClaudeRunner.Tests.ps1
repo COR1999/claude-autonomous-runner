@@ -272,3 +272,65 @@ Describe 'Format-TurnSummary' {
         Format-TurnSummary (ConvertFrom-TurnOutput -Text 'x' -ExitCode 1) 'Failure' | Should -Match 'non-json'
     }
 }
+
+Describe 'Resolve-ClaudeExecutable' {
+    BeforeAll {
+        $root = Join-Path ([IO.Path]::GetTempPath()) ('car-shim-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+        $bin = Join-Path $root 'node_modules/@anthropic-ai/claude-code/bin'
+        New-Item -ItemType Directory -Path $bin | Out-Null
+        $exe = Join-Path $bin 'claude.exe'
+        Set-Content -LiteralPath $exe -Value ''
+        $exe = (Resolve-Path -LiteralPath $exe).ProviderPath
+
+        # As written by npm's cmd-shim for a package whose bin is an .exe.
+        $cmd = Join-Path $root 'claude.cmd'
+        Set-Content -LiteralPath $cmd -Value @'
+@ECHO off
+GOTO start
+:find_dp0
+SET dp0=%~dp0
+EXIT /b
+:start
+SETLOCAL
+CALL :find_dp0
+"%dp0%\node_modules\@anthropic-ai\claude-code\bin\claude.exe"   %*
+'@
+        $ps1 = Join-Path $root 'claude.ps1'
+        Set-Content -LiteralPath $ps1 -Value @'
+#!/usr/bin/env pwsh
+$basedir=Split-Path $MyInvocation.MyCommand.Definition -Parent
+if ($MyInvocation.ExpectingInput) {
+  $input | & "$basedir/node_modules/@anthropic-ai/claude-code/bin/claude.exe"   $args
+} else {
+  & "$basedir/node_modules/@anthropic-ai/claude-code/bin/claude.exe"   $args
+}
+exit $LASTEXITCODE
+'@
+    }
+
+    AfterAll { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue }
+
+    It 'sees through a .cmd shim' {
+        Resolve-ClaudeExecutable $cmd | Should -Be $exe
+    }
+
+    It 'sees through a .ps1 shim' {
+        Resolve-ClaudeExecutable $ps1 | Should -Be $exe
+    }
+
+    It 'leaves a native executable alone' {
+        Resolve-ClaudeExecutable $exe | Should -Be $exe
+    }
+
+    It 'leaves a shim alone when its target is missing' {
+        $orphan = Join-Path $root 'orphan.cmd'
+        Set-Content -LiteralPath $orphan -Value '"%dp0%\node_modules\gone\claude.exe" %*'
+        Resolve-ClaudeExecutable $orphan | Should -Be $orphan
+    }
+
+    It 'leaves a shim that runs a script through node alone' {
+        $nodeShim = Join-Path $root 'old.cmd'
+        Set-Content -LiteralPath $nodeShim -Value '"%_prog%"  "%dp0%\node_modules\@anthropic-ai\claude-code\cli.js" %*'
+        Resolve-ClaudeExecutable $nodeShim | Should -Be $nodeShim
+    }
+}
