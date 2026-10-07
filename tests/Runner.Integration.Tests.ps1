@@ -64,10 +64,22 @@ exit "$code"
         & chmod +x $fake
     }
 
+    # One scripted reply of the fake CLI. -Hold leaves a grandchild holding
+    # stdout open for that many seconds after the fake exits.
+    function Step([string]$Out, [int]$Exit = 0, [int]$Sleep = 0, [int]$Hold = 0) {
+        $line = "$Exit`t$Sleep`t$Out"
+        if ($Hold) { $line += "`t$Hold" }
+        $line
+    }
+
+    function Set-FakeScript([string[]]$Steps) {
+        foreach ($f in 'count', 'pid', 'args') { Remove-Item -LiteralPath (Join-Path $fakeDir $f) -ErrorAction SilentlyContinue }
+        [IO.File]::WriteAllText((Join-Path $fakeDir 'script.tsv'), (($Steps -join "`n") + "`n"))
+    }
+
     function Invoke-Runner {
         param([string[]]$Script, [hashtable]$Options = @{})
-        foreach ($f in 'count', 'pid', 'args') { Remove-Item -LiteralPath (Join-Path $fakeDir $f) -ErrorAction SilentlyContinue }
-        [IO.File]::WriteAllText((Join-Path $fakeDir 'script.tsv'), (($Script -join "`n") + "`n"))
+        Set-FakeScript $Script
 
         $work = Join-Path $fakeDir ('work-' + [guid]::NewGuid().ToString('N').Substring(0, 6))
         $logs = Join-Path $work '_logs'
@@ -126,7 +138,7 @@ Describe 'claude-autonomous-runner.ps1 end to end' {
         # No embedded quotes: Windows PowerShell mangles them on the way into
         # the runner itself. Quoting is covered by the unit tests.
         $prompt = 'Keep going in C:\tmp\ dir, résumé · then reply DONE-ALL'
-        $r = Invoke-Runner -Script @("0`t0`t{`"type`":`"result`",`"is_error`":false,`"result`":`"DONE-ALL`",`"total_cost_usd`":0.5}") -Options @{ Prompt = $prompt }
+        $r = Invoke-Runner -Script @(Step '{"type":"result","is_error":false,"result":"DONE-ALL","total_cost_usd":0.5}') -Options @{ Prompt = $prompt }
         $r.Calls | Should -Be 1
         $r.Log | Should -Match 'outcome=Done \| cost=\$0\.5000'
         $r.Log | Should -Match 'Stopping: model reports goal complete'
@@ -136,19 +148,19 @@ Describe 'claude-autonomous-runner.ps1 end to end' {
     }
 
     It 'keeps going across turns until done' {
-        $r = Invoke-Runner -Script @("0`t0`tstill working", "0`t0`tmore work", "0`t0`tDONE-ALL")
+        $r = Invoke-Runner -Script @((Step 'still working'), (Step 'more work'), (Step 'DONE-ALL'))
         $r.Calls | Should -Be 3
         $r.Log | Should -Match 'turn 3 \| exit=0 \| outcome=Done'
     }
 
     It 'does not stop on a long reply that only talks about limits' {
         $chatty = 'Reworked the usage limit handling so it resets at 3pm. ' * 10
-        $r = Invoke-Runner -Script @("0`t0`t$chatty", "0`t0`tDONE-ALL")
+        $r = Invoke-Runner -Script @((Step $chatty), (Step 'DONE-ALL'))
         $r.Calls | Should -Be 2
     }
 
     It 'stops on a quota banner without -WaitForReset' {
-        $r = Invoke-Runner -Script @("1`t0`tYou've hit your session limit · resets 3am", "0`t0`tDONE-ALL")
+        $r = Invoke-Runner -Script @((Step "You've hit your session limit · resets 3am" -Exit 1), (Step 'DONE-ALL'))
         $r.Calls | Should -Be 1
         $r.Log | Should -Match 'Stopping: usage/rate limit detected\.'
         $r.Log | Should -Match '·'   # UTF-8 survives the round trip
@@ -157,7 +169,7 @@ Describe 'claude-autonomous-runner.ps1 end to end' {
 
     It 'resumes after a reset that is already due with -WaitForReset' {
         $banner = "You've hit your session limit · resets " + (Format-ResetClock (Get-Date).AddMinutes(-1))
-        $r = Invoke-Runner -Script @("1`t0`t$banner", "0`t0`tDONE-ALL") -Options @{ WaitForReset = $true; ResetBufferMinutes = 0 }
+        $r = Invoke-Runner -Script @((Step $banner -Exit 1), (Step 'DONE-ALL')) -Options @{ WaitForReset = $true; ResetBufferMinutes = 0 }
         $r.Calls | Should -Be 2
         $r.Log | Should -Match 'Limit hit; sleeping until'
         $r.Log | Should -Match 'outcome=Done'
@@ -165,48 +177,48 @@ Describe 'claude-autonomous-runner.ps1 end to end' {
 
     It 'stops when the reset falls after the deadline' {
         $banner = "usage limit reached · resets " + (Format-ResetClock (Get-Date).AddHours(3))
-        $r = Invoke-Runner -Script @("1`t0`t$banner") -Options @{ WaitForReset = $true }
+        $r = Invoke-Runner -Script @(Step $banner -Exit 1) -Options @{ WaitForReset = $true }
         $r.Calls | Should -Be 1
         $r.Log | Should -Match 'after the safety deadline'
         $r.ExitCode | Should -Be 2
     }
 
     It 'retries a limit that names no reset time, bounded by the failure limit' {
-        $r = Invoke-Runner -Script @("1`t0`tusage limit reached") -Options @{ WaitForReset = $true; FailureLimit = 2 }
+        $r = Invoke-Runner -Script @(Step 'usage limit reached' -Exit 1) -Options @{ WaitForReset = $true; FailureLimit = 2 }
         $r.Calls | Should -Be 2
         $r.Log | Should -Match 'no readable reset time; retrying after backoff'
         $r.ExitCode | Should -Be 3
     }
 
     It 'recovers from a bare API rate limit with -WaitForReset' {
-        $r = Invoke-Runner -Script @("1`t0`tAPI Error: 429 rate limit exceeded", "0`t0`tDONE-ALL") -Options @{ WaitForReset = $true }
+        $r = Invoke-Runner -Script @((Step 'API Error: 429 rate limit exceeded' -Exit 1), (Step 'DONE-ALL')) -Options @{ WaitForReset = $true }
         $r.Calls | Should -Be 2
         $r.ExitCode | Should -Be 0
     }
 
     It 'stops at the deadline with exit code 4' {
         # 0.0002 h is under a second; the 2s turn outlives it.
-        $r = Invoke-Runner -Script @("0`t2`tstill working") -Options @{ MaxHours = 0.0002 }
+        $r = Invoke-Runner -Script @(Step 'still working' -Sleep 2) -Options @{ MaxHours = 0.0002 }
         $r.Calls | Should -Be 1
         $r.Log | Should -Match 'safety deadline reached'
         $r.ExitCode | Should -Be 4
     }
 
     It 'gives up after the configured run of failures' {
-        $r = Invoke-Runner -Script @("1`t0`tboom") -Options @{ FailureLimit = 3 }
+        $r = Invoke-Runner -Script @(Step 'boom' -Exit 1) -Options @{ FailureLimit = 3 }
         $r.Calls | Should -Be 3
         $r.Log | Should -Match 'Stopping: 3 consecutive failed turns'
         $r.ExitCode | Should -Be 3
     }
 
     It 'resets the failure streak after a good turn' {
-        $r = Invoke-Runner -Script @("1`t0`tboom", "0`t0`tok", "1`t0`tboom", "0`t0`tDONE-ALL") -Options @{ FailureLimit = 2 }
+        $r = Invoke-Runner -Script @((Step 'boom' -Exit 1), (Step 'ok'), (Step 'boom' -Exit 1), (Step 'DONE-ALL')) -Options @{ FailureLimit = 2 }
         $r.Calls | Should -Be 4
         $r.Log | Should -Match 'outcome=Done'
     }
 
     It 'kills a turn that outlives the timeout' {
-        $r = Invoke-Runner -Script @("0`t60`tnever printed") -Options @{ TurnTimeoutMinutes = 0.05; FailureLimit = 1 }
+        $r = Invoke-Runner -Script @(Step 'never printed' -Sleep 60) -Options @{ TurnTimeoutMinutes = 0.05; FailureLimit = 1 }
         $r.Log | Should -Match 'Turn exceeded'
         $r.Log | Should -Match 'exit=124'
         $fakePid = [int](Get-Content -LiteralPath (Join-Path $fakeDir 'pid'))
@@ -215,7 +227,7 @@ Describe 'claude-autonomous-runner.ps1 end to end' {
 
     It 'does not hang when a leftover child keeps the output pipe open' {
         $started = Get-Date
-        $r = Invoke-Runner -Script @("0`t0`tDONE-ALL`t30") -Options @{ OutputDrainSeconds = 2 }
+        $r = Invoke-Runner -Script @(Step 'DONE-ALL' -Hold 30) -Options @{ OutputDrainSeconds = 2 }
         ((Get-Date) - $started).TotalSeconds | Should -BeLessThan 25
         $r.Calls | Should -Be 1
         $r.Log | Should -Match 'Output pipe still held open'
@@ -223,8 +235,7 @@ Describe 'claude-autonomous-runner.ps1 end to end' {
     }
 
     It 'does not leave a turn running when the runner itself is killed' {
-        [IO.File]::WriteAllText((Join-Path $fakeDir 'script.tsv'), "0`t60`tnever printed`n0`t0`tDONE-ALL`n")
-        foreach ($f in 'count', 'pid') { Remove-Item -LiteralPath (Join-Path $fakeDir $f) -ErrorAction SilentlyContinue }
+        Set-FakeScript @((Step 'never printed' -Sleep 60), (Step 'DONE-ALL'))
         $work = Join-Path $fakeDir 'killed'
         New-Item -ItemType Directory -Path $work | Out-Null
         $common = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $runner, '-WorkDir', $work, '-ClaudePath', $fake, '-MaxHours', '1', '-TurnDelaySeconds', '0')
@@ -253,8 +264,7 @@ Describe 'claude-autonomous-runner.ps1 end to end' {
     }
 
     It 'refuses to run twice against one folder' {
-        [IO.File]::WriteAllText((Join-Path $fakeDir 'script.tsv'), "0`t8`tDONE-ALL`n")
-        Remove-Item -LiteralPath (Join-Path $fakeDir 'pid') -ErrorAction SilentlyContinue
+        Set-FakeScript @(Step 'DONE-ALL' -Sleep 8)
         $work = Join-Path $fakeDir 'shared'
         New-Item -ItemType Directory -Path $work | Out-Null
         $common = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $runner, '-WorkDir', $work, '-ClaudePath', $fake, '-MaxHours', '1')
