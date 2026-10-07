@@ -171,25 +171,38 @@ function Get-TurnOutcome {
 function Get-LimitResetTime {
     <#
     .SYNOPSIS
-    Extracts the reset time from a quota message, as a local DateTime.
+    Extracts the reset time from a quota message, as a clock time in LocalZone.
 
     .DESCRIPTION
-    Understands "resets 1:10am", "resets at 3pm", "resets Oct 8, 3pm" and
-    "resets Oct 8 at 3:30 PM". A trailing "(Europe/Dublin)" style zone is
-    ignored: the time is taken as machine-local, which is what the CLI prints
-    for the logged-in user. A time-only value that passed within the last
-    GraceMinutes is returned as-is (the reset is due now); one further in the
-    past means the same clock time tomorrow. Returns $null when nothing parses.
+    Understands "resets 1:10am", "reset at 3pm", "resets Oct 8, 3pm",
+    "resets Oct 8 at 3:30 PM", and the older "usage limit reached|1749924000"
+    form whose suffix is a Unix timestamp.
+
+    A trailing zone such as "(Europe/Dublin)" is honoured when the runtime can
+    resolve it (pwsh on .NET 6+ knows IANA ids on every OS; Windows PowerShell
+    does not), otherwise the time is taken as local.
+
+    A time-only value that passed within the last GraceMinutes is returned
+    as-is (the reset is due now); one further in the past means the same
+    clock time tomorrow. Returns $null when nothing parses.
     #>
     param(
         [AllowEmptyString()][string]$Message,
         [datetime]$Now = (Get-Date),
-        [int]$GraceMinutes = 30
+        [int]$GraceMinutes = 30,
+        [TimeZoneInfo]$LocalZone = [TimeZoneInfo]::Local
     )
 
     if ([string]::IsNullOrEmpty($Message)) { return $null }
+    $nowClock = [datetime]::SpecifyKind($Now, [DateTimeKind]::Unspecified)
 
-    $rx = '(?i)resets?\s+(?:on\s+)?(?:(?<mon>jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(?<day>\d{1,2})(?:st|nd|rd|th)?,?\s+)?(?:at\s+)?(?<h>\d{1,2})(?::(?<m>\d{2}))?\s*(?<ap>am|pm)\b'
+    $epoch = [regex]::Match($Message, '(?i)limit reached\|(?<s>\d{10})\b')
+    if ($epoch.Success) {
+        $utc = [DateTimeOffset]::FromUnixTimeSeconds([long]$epoch.Groups['s'].Value).UtcDateTime
+        return [datetime]::SpecifyKind([TimeZoneInfo]::ConvertTimeFromUtc($utc, $LocalZone), [DateTimeKind]::Unspecified)
+    }
+
+    $rx = '(?i)resets?\s+(?:on\s+)?(?:(?<mon>jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(?<day>\d{1,2})(?:st|nd|rd|th)?,?\s+)?(?:at\s+)?(?<h>\d{1,2})(?::(?<m>\d{2}))?\s*(?<ap>am|pm)\b(?:\s*\((?<tz>[A-Za-z][\w+\-]*(?:/[\w+\-]+)+)\))?'
     $match = [regex]::Match($Message, $rx)
     if (-not $match.Success) { return $null }
 
@@ -200,22 +213,35 @@ function Get-LimitResetTime {
     if ($hour -eq 12) { $hour = 0 }
     if ($isPm) { $hour += 12 }
 
+    # Work on the zone's own wall clock, then convert the answer back.
+    $zone = $LocalZone
+    if ($match.Groups['tz'].Success) {
+        try { $zone = [TimeZoneInfo]::FindSystemTimeZoneById($match.Groups['tz'].Value) } catch { $zone = $LocalZone }
+    }
+    $zoneNow = if ($zone.Id -eq $LocalZone.Id) { $nowClock } else { [TimeZoneInfo]::ConvertTime($nowClock, $LocalZone, $zone) }
+
     if ($match.Groups['mon'].Success) {
         $months = 'jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'
         $month = [array]::IndexOf($months, $match.Groups['mon'].Value.Substring(0, 3).ToLowerInvariant()) + 1
         $day = [int]$match.Groups['day'].Value
-        if ($day -lt 1 -or $day -gt [datetime]::DaysInMonth($Now.Year, $month)) { return $null }
-        $candidate = New-Object datetime ($Now.Year, $month, $day, $hour, $minute, 0, [System.DateTimeKind]::Local)
+        if ($day -lt 1 -or $day -gt [datetime]::DaysInMonth($zoneNow.Year, $month)) { return $null }
+        $candidate = New-Object datetime ($zoneNow.Year, $month, $day, $hour, $minute, 0)
         # "resets Jan 2" seen on Dec 30 refers to next year.
-        if ($candidate -lt $Now.AddDays(-1)) { $candidate = $candidate.AddYears(1) }
-        return $candidate
+        if ($candidate -lt $zoneNow.AddDays(-1)) { $candidate = $candidate.AddYears(1) }
+    } else {
+        # The first occurrence not more than the grace window ago: a server
+        # still reporting "resets 1:10am" at 1:12am means "about now".
+        $candidate = (New-Object datetime ($zoneNow.Year, $zoneNow.Month, $zoneNow.Day, $hour, $minute, 0)).AddDays(-1)
+        while ($candidate -lt $zoneNow.AddMinutes(-$GraceMinutes)) { $candidate = $candidate.AddDays(1) }
     }
 
-    # The first occurrence not more than the grace window ago: a server still
-    # reporting "resets 1:10am" at 1:12am means "about now", not tomorrow.
-    $candidate = (New-Object datetime ($Now.Year, $Now.Month, $Now.Day, $hour, $minute, 0, [System.DateTimeKind]::Local)).AddDays(-1)
-    while ($candidate -lt $Now.AddMinutes(-$GraceMinutes)) { $candidate = $candidate.AddDays(1) }
-    $candidate
+    if ($zone.Id -eq $LocalZone.Id) { return $candidate }
+    try {
+        [TimeZoneInfo]::ConvertTime($candidate, $zone, $LocalZone)
+    } catch [ArgumentException] {
+        # A wall-clock time skipped by a DST change; an hour late is harmless.
+        [TimeZoneInfo]::ConvertTime($candidate.AddHours(1), $zone, $LocalZone)
+    }
 }
 
 function Format-TurnSummary {

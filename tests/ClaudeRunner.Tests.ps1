@@ -145,6 +145,10 @@ Describe 'Get-TurnOutcome' {
         Get-TurnOutcome (Get-JsonTurn 'API Error: 500' -IsError $true -ApiError 500) | Should -Be 'Failure'
     }
 
+    It 'is Limit for the older timestamped banner' {
+        Get-TurnOutcome (ConvertFrom-TurnOutput -Text 'Claude AI usage limit reached|1749924000' -ExitCode 1) | Should -Be 'Limit'
+    }
+
     It 'is Limit for the short plain-text banner even with exit 0' {
         $turn = ConvertFrom-TurnOutput -Text "You've hit your session limit · resets 1:10am (Europe/Dublin)" -ExitCode 0
         Get-TurnOutcome $turn | Should -Be 'Limit'
@@ -160,11 +164,47 @@ Describe 'Get-TurnOutcome' {
     }
 }
 
+BeforeDiscovery {
+    # IANA zone ids resolve on .NET 6+ (pwsh) everywhere, never on .NET Framework.
+    $ianaZones = try { [void][TimeZoneInfo]::FindSystemTimeZoneById('America/New_York'); $true } catch { $false }
+}
+
 Describe 'Get-LimitResetTime' {
     BeforeAll { $now = [datetime]'2026-10-07T00:25:00' }
 
+    It 'reads the Unix timestamp form' {
+        Get-LimitResetTime 'Claude AI usage limit reached|1749924000' -LocalZone ([TimeZoneInfo]::Utc) |
+            Should -Be ([datetime]'2025-06-14T18:00:00')
+    }
+
+    It 'reads "reset at" wording' {
+        Get-LimitResetTime 'Claude usage limit reached. Your limit will reset at 1pm.' -Now $now |
+            Should -Be ([datetime]'2026-10-07T13:00:00')
+    }
+
+    It 'converts a zoned reset to local time' -Skip:(-not $ianaZones) {
+        Get-LimitResetTime 'resets 1:10am (America/New_York)' -Now ([datetime]'2026-10-07T03:00:00') -LocalZone ([TimeZoneInfo]::Utc) |
+            Should -Be ([datetime]'2026-10-07T05:10:00')
+    }
+
+    It 'converts a zoned dated reset to local time' -Skip:(-not $ianaZones) {
+        Get-LimitResetTime 'resets Oct 9, 4pm (America/New_York)' -Now $now -LocalZone ([TimeZoneInfo]::Utc) |
+            Should -Be ([datetime]'2026-10-09T20:00:00')
+    }
+
+    It 'applies the grace window on the zone clock' -Skip:(-not $ianaZones) {
+        # 01:12 UTC is 21:12 in New York; a 9:10pm New York reset is 2 minutes old.
+        Get-LimitResetTime 'resets 9:10pm (America/New_York)' -Now ([datetime]'2026-10-07T01:12:00') -LocalZone ([TimeZoneInfo]::Utc) |
+            Should -Be ([datetime]'2026-10-07T01:10:00')
+    }
+
+    It 'falls back to local time for a zone it cannot resolve' {
+        Get-LimitResetTime 'resets 1:10am (Mars/Olympus_Mons)' -Now $now -LocalZone ([TimeZoneInfo]::Utc) |
+            Should -Be ([datetime]'2026-10-07T01:10:00')
+    }
+
     It 'reads a time later today' {
-        Get-LimitResetTime "You've hit your session limit · resets 1:10am (Europe/Dublin)" -Now $now |
+        Get-LimitResetTime "You've hit your session limit · resets 1:10am" -Now $now |
             Should -Be ([datetime]'2026-10-07T01:10:00')
     }
 

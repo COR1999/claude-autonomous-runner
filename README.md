@@ -109,8 +109,9 @@ project folder.
 - Limit detection matches Anthropic CLI error wording ("session limit",
   "usage limit", reset times...). Wording is an undocumented surface and can
   change between versions; the `-MaxHours` cap is the guaranteed backstop.
-- Reset times are read as machine-local time; a zone in the message such as
-  `(Europe/Dublin)` is ignored. Run it on a machine set to your account's zone.
+- A zone in the reset message such as `(Europe/Dublin)` is honoured under pwsh
+  7. Windows PowerShell 5.1 cannot resolve those names, so there the time is
+  read as machine-local: keep the machine on your account's zone, or use pwsh.
 - On Windows the turn timeout needs `claude.exe` (the native installer). An npm
   `.cmd` shim still works but its turns are not timed out. Elsewhere any
   executable `claude` is timed out.
