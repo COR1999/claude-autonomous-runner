@@ -246,10 +246,10 @@ Describe 'claude-autonomous-runner.ps1 end to end' {
         # Elsewhere the next runner finds the leftover and kills it.
         $second = Invoke-RunnerProcess ($common + @('-LogDir', (Join-Path $work 'b')))
         $second.ExitCode | Should -Be 0
-        Get-Process -Id $turnPid -ErrorAction SilentlyContinue | Should -BeNullOrEmpty
         if (-not $onWindows) {
             (Get-Content -Raw (Get-ChildItem (Join-Path $work 'b') -Filter *.log).FullName) | Should -Match "Killing turn $turnPid left running"
         }
+        Get-Process -Id $turnPid -ErrorAction SilentlyContinue | Should -BeNullOrEmpty
     }
 
     It 'refuses to run twice against one folder' {

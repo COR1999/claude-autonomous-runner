@@ -113,7 +113,8 @@ function Stop-ProcessTree([Diagnostics.Process]$Process) {
     if ($onWindows) {
         & taskkill.exe /T /F /PID $Process.Id 2>&1 | Out-Null
     } else {
-        $Process.Kill($true)  # .NET Core 3+: whole tree
+        # .NET Core 3+: whole tree. Throws if the process already exited.
+        try { $Process.Kill($true) } catch [InvalidOperationException] { Write-Verbose 'already exited' }
     }
 }
 
@@ -128,9 +129,12 @@ function Stop-LeftoverTurn {
     $leftover = Get-Process -Id ([int]$fields[0]) -ErrorAction SilentlyContinue
     if (-not $leftover) { return }
     try { $started = $leftover.StartTime.ToUniversalTime().Ticks } catch { return }
-    if ($started -ne [long]$fields[1]) { return }
+    # .NET on Linux derives StartTime from the system uptime, so two processes
+    # can read the same start a few milliseconds apart: allow a second.
+    if ([math]::Abs($started - [long]$fields[1]) -gt [TimeSpan]::TicksPerSecond) { return }
     Write-RunnerLog "Killing turn $($leftover.Id) left running by a previous runner."
     Stop-ProcessTree $leftover
+    [void]$leftover.WaitForExit(5000)
 }
 
 function Wait-Until([datetime]$Until) {
@@ -147,7 +151,13 @@ $sha = [Security.Cryptography.SHA256]::Create()
 $identity = if ($onWindows) { $WorkDir.ToLowerInvariant() } else { $WorkDir }
 $key = -join ($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($identity)) | Select-Object -First 8 | ForEach-Object { $_.ToString('x2') })
 $mutex = New-Object System.Threading.Mutex($false, "Global\claude-autonomous-runner-$key")
-$turnFile = Join-Path ([IO.Path]::GetTempPath()) "claude-autonomous-runner-$key.turn"
+# Per-user state, not the shared temp dir: on Linux /tmp is world-writable,
+# and a planted turn file would make the next runner kill a process of ours.
+$appData = [Environment]::GetFolderPath('LocalApplicationData')
+if (-not $appData) { $appData = [IO.Path]::GetTempPath() }  # no profile at all
+$stateDir = Join-Path $appData 'claude-autonomous-runner'
+New-Item -ItemType Directory -Force -Path $stateDir | Out-Null
+$turnFile = Join-Path $stateDir "$key.turn"
 try {
     $ownsMutex = $mutex.WaitOne(0)
 } catch [System.Threading.AbandonedMutexException] {
