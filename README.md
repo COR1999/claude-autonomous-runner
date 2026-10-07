@@ -33,7 +33,7 @@ run.
 
 ## Requirements
 
-- Windows with PowerShell 5.1+ (macOS/Linux port welcome)
+- Windows with PowerShell 5.1+, or [PowerShell 7](https://learn.microsoft.com/powershell/scripting/install/installing-powershell) (`pwsh`) on Windows, macOS or Linux
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed and logged in
 - A project folder containing a previous Claude Code session to resume
 
@@ -48,7 +48,7 @@ Options:
 | Parameter | Default | Purpose |
 |---|---|---|
 | `-WorkDir` | *(required)* | Project whose last session gets resumed |
-| `-MaxHours` | `10` | Safety deadline; always stops by this |
+| `-MaxHours` | `10` | Safety deadline; always stops by this (fractions allowed) |
 | `-FailureLimit` | `5` | Consecutive failed turns before giving up |
 | `-TurnDelaySeconds` | `5` | Pause between turns |
 | `-FailureBackoffSeconds` | `60` | Pause after a failed turn |
@@ -90,6 +90,13 @@ Stop-ScheduledTask    -TaskName 'Claude Autonomous'
 Unregister-ScheduledTask -TaskName 'Claude Autonomous' -Confirm:$false
 ```
 
+On macOS or Linux, cron does the same job:
+
+```sh
+# 03:30 every night
+30 3 * * * pwsh -NoProfile -File ~/claude-autonomous-runner/claude-autonomous-runner.ps1 -WorkDir ~/code/your-project -WaitForReset
+```
+
 Review what it did interactively afterwards: `claude --continue` inside the
 project folder.
 
@@ -103,8 +110,9 @@ project folder.
   change between versions; the `-MaxHours` cap is the guaranteed backstop.
 - Reset times are read as machine-local time; a zone in the message such as
   `(Europe/Dublin)` is ignored. Run it on a machine set to your account's zone.
-- The turn timeout needs `claude.exe` (the native installer). An npm `.cmd`
-  shim still works but its turns are not timed out.
+- On Windows the turn timeout needs `claude.exe` (the native installer). An npm
+  `.cmd` shim still works but its turns are not timed out. Elsewhere any
+  executable `claude` is timed out.
 - Resumes whatever session was **last active in that folder** — nothing else.
 - The machine must stay powered on. Asleep mid-run just pauses it.
 - It will happily burn your entire remaining quota on the task you give it.
@@ -117,8 +125,12 @@ Invoke-Pester ./tests
 Invoke-ScriptAnalyzer -Path . -Recurse -Settings ./PSScriptAnalyzerSettings.psd1
 ```
 
-The parsing and decision logic lives in `ClaudeRunner.psm1` so it can be tested
-without launching the CLI; CI runs both under Windows PowerShell 5.1 and pwsh.
+The parsing and decision logic lives in `ClaudeRunner.psm1` and is unit tested
+without the CLI. `tests/Runner.Integration.Tests.ps1` drives the real script
+against a scripted fake `claude` (compiled C# on Windows, bash elsewhere) to cover
+the stop conditions, the reset wait, the turn timeout and the single-instance
+lock. CI runs everything under Windows PowerShell 5.1 and under pwsh on Windows,
+Linux and macOS.
 
 ## License
 

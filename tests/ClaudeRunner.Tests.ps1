@@ -1,5 +1,5 @@
 ﻿BeforeAll {
-    Import-Module (Join-Path $PSScriptRoot '..\ClaudeRunner.psm1') -Force
+    Import-Module (Join-Path (Split-Path $PSScriptRoot) 'ClaudeRunner.psm1') -Force
 
     if (-not ('ArgvProbe' -as [type])) {
         Add-Type -TypeDefinition @'
@@ -33,7 +33,8 @@ public static class ArgvProbe {
     }
 }
 
-Describe 'ConvertTo-WindowsArgument' {
+# CommandLineToArgvW is the Windows parser this quoting targets.
+Describe 'ConvertTo-WindowsArgument' -Skip:([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
     It 'round-trips <Name> through CommandLineToArgvW' -ForEach @(
         @{ Name = 'plain word'; Value = 'hello' }
         @{ Name = 'empty string'; Value = '' }

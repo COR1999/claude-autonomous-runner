@@ -2,13 +2,13 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$WorkDir,
 
-    [int]$MaxHours = 10,
+    [double]$MaxHours = 10,
     [int]$FailureLimit = 5,
     [int]$TurnDelaySeconds = 5,
     [int]$FailureBackoffSeconds = 60,
-    [int]$TurnTimeoutMinutes = 120,
+    [double]$TurnTimeoutMinutes = 120,
     [switch]$WaitForReset,
-    [int]$ResetBufferMinutes = 2,
+    [double]$ResetBufferMinutes = 2,
     [string]$LogDir = (Join-Path $PSScriptRoot 'logs'),
     [string]$ClaudePath,
     [string]$Prompt = "Continue working autonomously on the current task from this session. Make concrete progress without asking questions. If the overall goal is fully complete with nothing left to do, reply with exactly: DONE-ALL"
@@ -16,6 +16,7 @@ param(
 
 $ErrorActionPreference = 'Continue'
 Import-Module (Join-Path $PSScriptRoot 'ClaudeRunner.psm1') -Force
+$onWindows = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
 
 if (-not (Test-Path -LiteralPath $WorkDir -PathType Container)) {
     throw "WorkDir does not exist: $WorkDir"
@@ -28,7 +29,9 @@ $logFile = Join-Path $LogDir ("{0}-{1}.log" -f (Split-Path $WorkDir -Leaf), $tim
 
 $claude = $ClaudePath
 if (-not $claude) { $claude = (Get-Command claude -ErrorAction SilentlyContinue).Source }
-if (-not $claude) { $claude = Join-Path $env:USERPROFILE '.local\bin\claude.exe' }
+if (-not $claude) {
+    $claude = [IO.Path]::Combine([Environment]::GetFolderPath('UserProfile'), '.local', 'bin', $(if ($onWindows) { 'claude.exe' } else { 'claude' }))
+}
 if (-not (Test-Path -LiteralPath $claude)) { throw "claude executable not found: $claude" }
 
 function Write-RunnerLog([string]$Message) {
@@ -38,16 +41,23 @@ function Write-RunnerLog([string]$Message) {
 function Invoke-ClaudeTurn {
     $claudeArgs = @('-p', '--continue', '--dangerously-skip-permissions', '--output-format', 'json', $Prompt)
 
-    if ([IO.Path]::GetExtension($claude) -ne '.exe') {
-        # npm installs expose claude as a .cmd/.ps1 shim, which cannot be
-        # started (and killed) as a bare process; run it without a timeout.
+    $extension = [IO.Path]::GetExtension($claude).ToLowerInvariant()
+    $isBinary = if ($onWindows) { $extension -eq '.exe' } else { $extension -ne '.ps1' }
+    if (-not $isBinary) {
+        # npm installs on Windows expose claude as a .cmd/.ps1 shim, which
+        # cannot be started (and killed) as a bare process; run it without a
+        # timeout.
         $text = & $claude @claudeArgs 2>&1 | Out-String
         return ConvertFrom-TurnOutput -Text $text -ExitCode $LASTEXITCODE
     }
 
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $claude
-    $psi.Arguments = ($claudeArgs | ForEach-Object { ConvertTo-WindowsArgument $_ }) -join ' '
+    if ($psi.PSObject.Properties['ArgumentList']) {
+        foreach ($a in $claudeArgs) { $psi.ArgumentList.Add($a) }
+    } else {
+        $psi.Arguments = ($claudeArgs | ForEach-Object { ConvertTo-WindowsArgument $_ }) -join ' '
+    }
     $psi.WorkingDirectory = $WorkDir
     $psi.UseShellExecute = $false
     $psi.CreateNoWindow = $true
@@ -62,10 +72,14 @@ function Invoke-ClaudeTurn {
     $stdout = $proc.StandardOutput.ReadToEndAsync()
     $stderr = $proc.StandardError.ReadToEndAsync()
 
-    $timeoutMs = if ($TurnTimeoutMinutes -gt 0) { $TurnTimeoutMinutes * 60000 } else { -1 }
+    $timeoutMs = if ($TurnTimeoutMinutes -gt 0) { [int]($TurnTimeoutMinutes * 60000) } else { -1 }
     if (-not $proc.WaitForExit($timeoutMs)) {
         Write-RunnerLog "Turn exceeded ${TurnTimeoutMinutes} minutes; killing process tree $($proc.Id)."
-        & taskkill.exe /T /F /PID $proc.Id 2>&1 | Out-Null
+        if ($onWindows) {
+            & taskkill.exe /T /F /PID $proc.Id 2>&1 | Out-Null
+        } else {
+            $proc.Kill($true)  # .NET Core 3+: whole tree
+        }
         $proc.WaitForExit()
         $text = "Turn timed out after $TurnTimeoutMinutes minutes.`r`n" + $stdout.Result + $stderr.Result
         return ConvertFrom-TurnOutput -Text $text -ExitCode 124
@@ -88,7 +102,8 @@ function Wait-Until([datetime]$Until) {
 
 # Two runners resuming the same folder would interleave turns in one session.
 $sha = [Security.Cryptography.SHA256]::Create()
-$key = -join ($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($WorkDir.ToLowerInvariant())) | Select-Object -First 8 | ForEach-Object { $_.ToString('x2') })
+$identity = if ($onWindows) { $WorkDir.ToLowerInvariant() } else { $WorkDir }
+$key = -join ($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($identity)) | Select-Object -First 8 | ForEach-Object { $_.ToString('x2') })
 $mutex = New-Object System.Threading.Mutex($false, "Global\claude-autonomous-runner-$key")
 try {
     $ownsMutex = $mutex.WaitOne(0)
