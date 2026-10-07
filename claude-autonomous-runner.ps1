@@ -27,8 +27,18 @@ if (-not (Test-Path -LiteralPath $WorkDir -PathType Container)) {
 $WorkDir = (Resolve-Path -LiteralPath $WorkDir).ProviderPath
 
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
-$timeStamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-$logFile = Join-Path $LogDir ("{0}-{1}.log" -f (Split-Path $WorkDir -Leaf), $timeStamp)
+$logBase = Join-Path $LogDir ("{0}-{1}" -f (Split-Path $WorkDir -Leaf), (Get-Date -Format 'yyyyMMdd-HHmmss'))
+# Claim the name atomically: two runners started in the same second (a
+# double-fired schedule, say) must not write into one log.
+for ($n = 1; ; $n++) {
+    $logFile = if ($n -eq 1) { "$logBase.log" } else { "$logBase-$n.log" }
+    try {
+        [IO.File]::Open($logFile, [IO.FileMode]::CreateNew).Dispose()
+        break
+    } catch [IO.IOException] {
+        if ($n -ge 100) { throw }
+    }
+}
 
 $claude = $ClaudePath
 if (-not $claude) { $claude = (Get-Command claude -ErrorAction SilentlyContinue).Source }

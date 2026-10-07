@@ -278,6 +278,26 @@ Describe 'claude-autonomous-runner.ps1 end to end' {
         Test-Path (Join-Path $work 'l') | Should -BeFalse
     }
 
+    It 'never writes into a log another run already created' {
+        Set-FakeScript @(Step 'DONE-ALL')
+        $work = Join-Path $fakeDir 'samesecond'
+        $logs = Join-Path $work 'l'
+        New-Item -ItemType Directory -Path $logs -Force | Out-Null
+        # Occupy every name the runner could pick in the next few seconds.
+        $now = Get-Date
+        $taken = 0..10 | ForEach-Object { Join-Path $logs ('samesecond-{0:yyyyMMdd-HHmmss}.log' -f $now.AddSeconds($_)) }
+        foreach ($t in $taken) { Set-Content -LiteralPath $t -Value 'taken' }
+
+        $proc = Invoke-RunnerProcess @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $runner,
+            '-WorkDir', $work, '-LogDir', $logs, '-ClaudePath', $fake, '-MaxHours', '1')
+        $proc.ExitCode | Should -Be 0
+
+        foreach ($t in $taken) { (Get-Content -Raw -LiteralPath $t).Trim() | Should -Be 'taken' }
+        $own = @(Get-ChildItem -LiteralPath $logs -Filter 'samesecond-*-2.log')
+        $own.Count | Should -Be 1
+        (Get-Content -Raw -LiteralPath $own[0].FullName) | Should -Match 'outcome=Done'
+    }
+
     It 'refuses to run twice against one folder' {
         Set-FakeScript @(Step 'DONE-ALL' -Sleep 8)
         $work = Join-Path $fakeDir 'shared'

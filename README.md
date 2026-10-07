@@ -76,7 +76,8 @@ server can lag the clock), with retries spaced by `-FailureBackoffSeconds`. A
 limit with no reset time in it, such as a bare API 429, is retried like a failed
 turn. The run still stops if the reset falls after `-MaxHours`.
 
-Logs land in `<LogDir>\<project>-<start-time>.log`, one file per run.
+Logs land in `<LogDir>\<project>-<start-time>.log`, one file per run (a `-2`,
+`-3`, ... suffix is added if another run already took that name).
 
 The exit code says why the run ended, which shows up as Task Scheduler's
 *Last Run Result* or in cron mail:
