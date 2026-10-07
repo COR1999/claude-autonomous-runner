@@ -2,7 +2,7 @@
 
 Keep **Claude Code** working unattended. A small PowerShell loop that relaunches
 headless turns back-to-back so the model never sits idle waiting for input — and
-stops itself cleanly when your usage limit hits.
+either stops cleanly when your usage limit hits or sleeps until it resets.
 
 Proven in real use: scheduled overnight, it resumed a session and merged 14 PRs
 in about an hour before the quota stopped it.
@@ -10,15 +10,16 @@ in about an hour before the quota stopped it.
 ## How it works
 
 ```
-Task Scheduler / manual launch
+Task Scheduler / cron / manual launch
   └─> cd <your project>
        └─> loop:
              claude -p --continue --dangerously-skip-permissions --output-format json "<prompt>"
-             ├─ reply ends with DONE-ALL      -> stop (goal complete)
-             ├─ error carries limit wording   -> stop, or sleep until the reset (-WaitForReset)
+             ├─ reply ends with DONE-ALL      -> stop, exit 0 (goal complete)
+             ├─ error carries limit wording   -> stop, exit 2 — or with -WaitForReset,
+             │                                   sleep until the reset it names
              ├─ turn runs past the timeout    -> kill its process tree, count a failure
-             ├─ N consecutive failures        -> stop (something broke)
-             └─ max-hours cap                 -> stop (runaway backstop)
+             ├─ N consecutive failures        -> stop, exit 3 (something broke)
+             └─ max-hours cap                 -> stop, exit 4 (runaway backstop)
 ```
 
 The whole trick is `claude -p --continue`: headless mode that resumes the most
