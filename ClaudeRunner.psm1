@@ -7,6 +7,10 @@ $script:LimitPattern = '(?i)session limit|usage limit|rate limit|limit reached|l
 
 $script:DoneToken = 'DONE-ALL'
 
+# A plain-text quota banner is one short line; a successful reply that merely
+# mentions limits is usually longer than this.
+$script:BannerMaxLength = 300
+
 # PipeDrain reads a redirected pipe on a worker thread, keeping whatever has
 # arrived: ReadToEnd only returns at EOF, and EOF never comes while any
 # descendant (a dev server the model started, say) still holds the pipe open.
@@ -209,7 +213,7 @@ function Get-TurnOutcome {
         # Without JSON we cannot tell a reply from an error banner. The quota
         # banner is a single short line, so only short output is trusted.
         if (Test-LimitMessage $Turn.Result) {
-            if ($Turn.IsError -or $Turn.Result.Length -le 300) { return 'Limit' }
+            if ($Turn.IsError -or $Turn.Result.Length -le $script:BannerMaxLength) { return 'Limit' }
         }
     }
 
