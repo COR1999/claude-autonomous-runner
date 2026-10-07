@@ -263,6 +263,21 @@ Describe 'claude-autonomous-runner.ps1 end to end' {
         Get-Process -Id $turnPid -ErrorAction SilentlyContinue | Should -BeNullOrEmpty
     }
 
+    It 'rejects <Name> at launch, before any turn or log' -ForEach @(
+        @{ Name = 'a zero deadline'; Bad = @('-MaxHours', '0') }
+        @{ Name = 'a negative delay'; Bad = @('-TurnDelaySeconds', '-1') }
+        @{ Name = 'a zero failure limit'; Bad = @('-FailureLimit', '0') }
+    ) {
+        Set-FakeScript @(Step 'DONE-ALL')
+        $work = Join-Path $fakeDir ('bad-' + [guid]::NewGuid().ToString('N').Substring(0, 6))
+        New-Item -ItemType Directory -Path $work | Out-Null
+        $proc = Invoke-RunnerProcess (@('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $runner,
+                '-WorkDir', $work, '-LogDir', (Join-Path $work 'l'), '-ClaudePath', $fake) + $Bad)
+        $proc.ExitCode | Should -Be 1
+        Test-Path (Join-Path $fakeDir 'count') | Should -BeFalse
+        Test-Path (Join-Path $work 'l') | Should -BeFalse
+    }
+
     It 'refuses to run twice against one folder' {
         Set-FakeScript @(Step 'DONE-ALL' -Sleep 8)
         $work = Join-Path $fakeDir 'shared'

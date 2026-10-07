@@ -2,17 +2,19 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$WorkDir,
 
-    [double]$MaxHours = 10,
-    [int]$FailureLimit = 5,
-    [int]$TurnDelaySeconds = 5,
-    [int]$FailureBackoffSeconds = 60,
-    [double]$TurnTimeoutMinutes = 120,
-    [int]$OutputDrainSeconds = 30,
+    # Validated here, at the boundary, so a bad value fails at launch rather
+    # than at the first sleep or deadline check hours into a run.
+    [ValidateScript({ $_ -gt 0 })][double]$MaxHours = 10,
+    [ValidateRange(1, [int]::MaxValue)][int]$FailureLimit = 5,
+    [ValidateRange(0, [int]::MaxValue)][int]$TurnDelaySeconds = 5,
+    [ValidateRange(0, [int]::MaxValue)][int]$FailureBackoffSeconds = 60,
+    [ValidateScript({ $_ -ge 0 })][double]$TurnTimeoutMinutes = 120,
+    [ValidateRange(0, [int]::MaxValue)][int]$OutputDrainSeconds = 30,
     [switch]$WaitForReset,
-    [double]$ResetBufferMinutes = 2,
+    [ValidateScript({ $_ -ge 0 })][double]$ResetBufferMinutes = 2,
     [string]$LogDir = (Join-Path $PSScriptRoot 'logs'),
     [string]$ClaudePath,
-    [string]$Prompt = "Continue working autonomously on the current task from this session. Make concrete progress without asking questions. If the overall goal is fully complete with nothing left to do, reply with exactly: DONE-ALL"
+    [ValidateNotNullOrEmpty()][string]$Prompt = "Continue working autonomously on the current task from this session. Make concrete progress without asking questions. If the overall goal is fully complete with nothing left to do, reply with exactly: DONE-ALL"
 )
 
 $ErrorActionPreference = 'Continue'
