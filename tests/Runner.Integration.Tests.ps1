@@ -5,8 +5,9 @@
     $script:psExe = (Get-Process -Id $PID).Path
 
     # A stand-in for the claude CLI. Each invocation plays the next line of
-    # script.tsv ("exit<TAB>sleepSeconds<TAB>stdout", \n for newlines; the last
-    # line repeats), and records its argv and pid next to itself.
+    # script.tsv ("exit<TAB>sleepSeconds<TAB>stdout[<TAB>holdSeconds]", \n for
+    # newlines; the last line repeats), and records its argv and pid next to
+    # itself. holdSeconds leaves a grandchild holding stdout open after exit.
     $script:fakeDir = Join-Path ([IO.Path]::GetTempPath()) ('car-fake-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
     New-Item -ItemType Directory -Path $fakeDir | Out-Null
 
@@ -24,11 +25,17 @@ public static class Fake {
         File.WriteAllText(Path.Combine(dir, "pid"), System.Diagnostics.Process.GetCurrentProcess().Id.ToString());
         File.WriteAllLines(Path.Combine(dir, "args"), args);
         string[] lines = File.ReadAllLines(Path.Combine(dir, "script.tsv"));
-        string[] parts = lines[Math.Min(n, lines.Length - 1)].Split(new[] { '\t' }, 3);
+        string[] parts = lines[Math.Min(n, lines.Length - 1)].Split(new[] { '\t' }, 4);
         Thread.Sleep(int.Parse(parts[1]) * 1000);
         var stdout = Console.OpenStandardOutput();
         byte[] bytes = new System.Text.UTF8Encoding(false).GetBytes(parts[2].Replace("\\n", "\n") + "\n");
         stdout.Write(bytes, 0, bytes.Length);
+        stdout.Flush();
+        if (parts.Length > 3) {
+            var hold = new System.Diagnostics.ProcessStartInfo("cmd.exe", "/c ping -n " + (int.Parse(parts[3]) + 1) + " 127.0.0.1 >nul");
+            hold.UseShellExecute = false;
+            System.Diagnostics.Process.Start(hold);
+        }
         return int.Parse(parts[0]);
     }
 }
@@ -47,9 +54,10 @@ echo $$ > "$dir/pid"
 printf '%s\n' "$@" > "$dir/args"
 total=$(wc -l < "$dir/script.tsv")
 idx=$((n + 1)); [ "$idx" -gt "$total" ] && idx=$total
-IFS=$'\t' read -r code secs text < <(sed -n "${idx}p" "$dir/script.tsv")
+IFS=$'\t' read -r code secs text hold < <(sed -n "${idx}p" "$dir/script.tsv")
 sleep "$secs"
 printf '%s\n' "${text//\\n/$'\n'}"
+[ -n "$hold" ] && { sleep "$hold" & }
 exit "$code"
 '@
         [IO.File]::WriteAllText($fake, $body.Replace("`r`n", "`n"))
@@ -181,6 +189,15 @@ Describe 'claude-autonomous-runner.ps1 end to end' {
         $r.Log | Should -Match 'exit=124'
         $fakePid = [int](Get-Content -LiteralPath (Join-Path $fakeDir 'pid'))
         Get-Process -Id $fakePid -ErrorAction SilentlyContinue | Should -BeNullOrEmpty
+    }
+
+    It 'does not hang when a leftover child keeps the output pipe open' {
+        $started = Get-Date
+        $r = Invoke-Runner -Script @("0`t0`tDONE-ALL`t30") -Options @{ OutputDrainSeconds = 2 }
+        ((Get-Date) - $started).TotalSeconds | Should -BeLessThan 25
+        $r.Calls | Should -Be 1
+        $r.Log | Should -Match 'Output pipe still held open'
+        $r.Log | Should -Match 'outcome=Done'
     }
 
     It 'refuses to run twice against one folder' {

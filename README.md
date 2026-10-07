@@ -53,6 +53,7 @@ Options:
 | `-TurnDelaySeconds` | `5` | Pause between turns |
 | `-FailureBackoffSeconds` | `60` | Pause after a failed turn |
 | `-TurnTimeoutMinutes` | `120` | Kill a turn that runs longer than this (`0` = never) |
+| `-OutputDrainSeconds` | `30` | After the CLI exits, how long to wait for a child process still holding its output open |
 | `-WaitForReset` | off | On a quota limit, sleep until the reset time it reports, then carry on |
 | `-ResetBufferMinutes` | `2` | Extra wait after the reported reset |
 | `-LogDir` | `logs\` next to the script | Where run logs go |

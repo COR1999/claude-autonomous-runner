@@ -7,6 +7,7 @@ param(
     [int]$TurnDelaySeconds = 5,
     [int]$FailureBackoffSeconds = 60,
     [double]$TurnTimeoutMinutes = 120,
+    [int]$OutputDrainSeconds = 30,
     [switch]$WaitForReset,
     [double]$ResetBufferMinutes = 2,
     [string]$LogDir = (Join-Path $PSScriptRoot 'logs'),
@@ -67,13 +68,18 @@ function Invoke-ClaudeTurn {
     $psi.StandardOutputEncoding = [Text.Encoding]::UTF8
     $psi.StandardErrorEncoding = [Text.Encoding]::UTF8
 
-    $proc = [Diagnostics.Process]::Start($psi)
+    try {
+        $proc = [Diagnostics.Process]::Start($psi)
+    } catch {
+        return ConvertFrom-TurnOutput -Text "Could not start ${claude}: $($_.Exception.Message)" -ExitCode 127
+    }
     $proc.StandardInput.Close()
-    $stdout = $proc.StandardOutput.ReadToEndAsync()
-    $stderr = $proc.StandardError.ReadToEndAsync()
+    $stdout = New-Object ClaudeRunner.PipeDrain $proc.StandardOutput
+    $stderr = New-Object ClaudeRunner.PipeDrain $proc.StandardError
 
     $timeoutMs = if ($TurnTimeoutMinutes -gt 0) { [int]($TurnTimeoutMinutes * 60000) } else { -1 }
-    if (-not $proc.WaitForExit($timeoutMs)) {
+    $timedOut = -not $proc.WaitForExit($timeoutMs)
+    if ($timedOut) {
         Write-RunnerLog "Turn exceeded ${TurnTimeoutMinutes} minutes; killing process tree $($proc.Id)."
         if ($onWindows) {
             & taskkill.exe /T /F /PID $proc.Id 2>&1 | Out-Null
@@ -81,13 +87,20 @@ function Invoke-ClaudeTurn {
             $proc.Kill($true)  # .NET Core 3+: whole tree
         }
         $proc.WaitForExit()
-        $text = "Turn timed out after $TurnTimeoutMinutes minutes.`r`n" + $stdout.Result + $stderr.Result
-        return ConvertFrom-TurnOutput -Text $text -ExitCode 124
     }
-    $proc.WaitForExit()  # flushes the async readers
 
-    $text = $stdout.Result
-    if ($stderr.Result.Trim()) { $text = $stderr.Result.TrimEnd() + "`r`n" + $text }
+    # A descendant that outlived the CLI can hold the pipes open forever;
+    # give the tail a moment to arrive, then take what is there.
+    $drained = $stdout.Wait($OutputDrainSeconds * 1000) -and $stderr.Wait($OutputDrainSeconds * 1000)
+    if (-not $drained) {
+        Write-RunnerLog "Output pipe still held open ${OutputDrainSeconds}s after exit (a leftover child process?); continuing with what was read."
+    }
+
+    $text = $stdout.Text
+    if ($stderr.Text.Trim()) { $text = $stderr.Text.TrimEnd() + "`r`n" + $text }
+    if ($timedOut) {
+        return ConvertFrom-TurnOutput -Text ("Turn timed out after $TurnTimeoutMinutes minutes.`r`n" + $text) -ExitCode 124
+    }
     ConvertFrom-TurnOutput -Text $text -ExitCode $proc.ExitCode
 }
 

@@ -7,6 +7,34 @@ $script:LimitPattern = '(?i)session limit|usage limit|rate limit|limit reached|l
 
 $script:DoneToken = 'DONE-ALL'
 
+# Reads a redirected pipe on a worker thread, keeping whatever has arrived.
+# ReadToEnd only returns at EOF, and EOF never comes while any descendant
+# (a dev server the model started, say) still holds the pipe open.
+if (-not ('ClaudeRunner.PipeDrain' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System.IO;
+using System.Text;
+using System.Threading.Tasks;
+namespace ClaudeRunner {
+    public sealed class PipeDrain {
+        private readonly StringBuilder text = new StringBuilder();
+        private readonly Task task;
+        public PipeDrain(TextReader reader) {
+            task = Task.Run(() => {
+                var buffer = new char[4096];
+                int n;
+                while ((n = reader.Read(buffer, 0, buffer.Length)) > 0) {
+                    lock (text) { text.Append(buffer, 0, n); }
+                }
+            });
+        }
+        public bool Wait(int milliseconds) { return task.Wait(milliseconds); }
+        public string Text { get { lock (text) { return text.ToString(); } } }
+    }
+}
+'@
+}
+
 function ConvertTo-WindowsArgument {
     <#
     .SYNOPSIS
