@@ -149,12 +149,14 @@ function Get-LimitResetTime {
     Understands "resets 1:10am", "resets at 3pm", "resets Oct 8, 3pm" and
     "resets Oct 8 at 3:30 PM". A trailing "(Europe/Dublin)" style zone is
     ignored: the time is taken as machine-local, which is what the CLI prints
-    for the logged-in user. A time-only value already in the past is taken to
-    mean the same clock time tomorrow. Returns $null when nothing parses.
+    for the logged-in user. A time-only value that passed within the last
+    GraceMinutes is returned as-is (the reset is due now); one further in the
+    past means the same clock time tomorrow. Returns $null when nothing parses.
     #>
     param(
         [AllowEmptyString()][string]$Message,
-        [datetime]$Now = (Get-Date)
+        [datetime]$Now = (Get-Date),
+        [int]$GraceMinutes = 30
     )
 
     if ([string]::IsNullOrEmpty($Message)) { return $null }
@@ -181,8 +183,10 @@ function Get-LimitResetTime {
         return $candidate
     }
 
-    $candidate = New-Object datetime ($Now.Year, $Now.Month, $Now.Day, $hour, $minute, 0, [System.DateTimeKind]::Local)
-    if ($candidate -le $Now) { $candidate = $candidate.AddDays(1) }
+    # The first occurrence not more than the grace window ago: a server still
+    # reporting "resets 1:10am" at 1:12am means "about now", not tomorrow.
+    $candidate = (New-Object datetime ($Now.Year, $Now.Month, $Now.Day, $hour, $minute, 0, [System.DateTimeKind]::Local)).AddDays(-1)
+    while ($candidate -lt $Now.AddMinutes(-$GraceMinutes)) { $candidate = $candidate.AddDays(1) }
     $candidate
 }
 

@@ -64,8 +64,10 @@ exits instead of interleaving turns into the same session.
 
 With `-WaitForReset` a 5-hour session limit no longer ends the night: the runner
 reads `resets 1:10am` (or `resets Oct 9, 4pm`) from the message, sleeps until
-then, and resumes. It still stops if the reset falls after `-MaxHours`, or if no
-reset time can be read.
+then, and resumes. A reset that passed in the last 30 minutes counts as due now
+(the server can lag the clock), with retries spaced by `-FailureBackoffSeconds`.
+It still stops if the reset falls after `-MaxHours`, or if no reset time can be
+read.
 
 Logs land in `<LogDir>\<project>-<start-time>.log`, one file per run.
 

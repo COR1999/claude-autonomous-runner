@@ -135,12 +135,16 @@ try {
                 Write-RunnerLog "Stopping: usage/rate limit detected, but no reset time could be read from it."
                 break
             }
+            # Never sooner than the failure backoff: a reset that is due now
+            # but not yet applied server-side must not become a busy loop.
             $resumeAt = $resetAt.AddMinutes($ResetBufferMinutes)
+            $earliest = (Get-Date).AddSeconds($FailureBackoffSeconds)
+            if ($resumeAt -lt $earliest) { $resumeAt = $earliest }
             if ($resumeAt -ge $deadline) {
                 Write-RunnerLog ("Stopping: limit resets at {0:yyyy-MM-dd HH:mm}, after the safety deadline." -f $resetAt)
                 break
             }
-            Write-RunnerLog ("Limit hit; sleeping until {0:yyyy-MM-dd HH:mm}." -f $resumeAt)
+            Write-RunnerLog ("Limit hit; sleeping until {0:yyyy-MM-dd HH:mm:ss}." -f $resumeAt)
             Wait-Until $resumeAt
             $consecutiveFailures = 0
             continue

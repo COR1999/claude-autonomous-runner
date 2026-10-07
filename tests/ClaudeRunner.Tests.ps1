@@ -167,8 +167,23 @@ Describe 'Get-LimitResetTime' {
             Should -Be ([datetime]'2026-10-07T01:10:00')
     }
 
-    It 'rolls a past time over to tomorrow' {
+    It 'rolls a time well in the past over to tomorrow' {
+        Get-LimitResetTime 'limit reached, resets at 11pm' -Now ([datetime]'2026-10-07T23:45:00') |
+            Should -Be ([datetime]'2026-10-08T23:00:00')
+    }
+
+    It 'treats a reset that passed within the grace window as due now' {
         Get-LimitResetTime 'limit reached, resets at 12am' -Now $now |
+            Should -Be ([datetime]'2026-10-07T00:00:00')
+    }
+
+    It 'applies the grace window across midnight' {
+        Get-LimitResetTime 'resets 11:50pm' -Now ([datetime]'2026-10-08T00:05:00') |
+            Should -Be ([datetime]'2026-10-07T23:50:00')
+    }
+
+    It 'honours a custom grace window' {
+        Get-LimitResetTime 'resets at 12am' -Now $now -GraceMinutes 10 |
             Should -Be ([datetime]'2026-10-08T00:00:00')
     }
 
