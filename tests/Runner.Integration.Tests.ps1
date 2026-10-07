@@ -73,20 +73,22 @@ exit "$code"
         $logs = Join-Path $work '_logs'
         New-Item -ItemType Directory -Path $work | Out-Null
 
+        $settings = @{ MaxHours = 1; TurnDelaySeconds = 0; FailureBackoffSeconds = 0 }
+        foreach ($k in $Options.Keys) { $settings[$k] = $Options[$k] }
         $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $runner,
-            '-WorkDir', $work, '-LogDir', $logs, '-ClaudePath', $fake, '-MaxHours', '1',
-            '-TurnDelaySeconds', '0', '-FailureBackoffSeconds', '0')
-        foreach ($k in $Options.Keys) {
-            if ($Options[$k] -is [bool]) { if ($Options[$k]) { $argList += "-$k" } }
-            else { $argList += "-$k"; $argList += [string]$Options[$k] }
+            '-WorkDir', $work, '-LogDir', $logs, '-ClaudePath', $fake)
+        foreach ($k in $settings.Keys) {
+            if ($settings[$k] -is [bool]) { if ($settings[$k]) { $argList += "-$k" } }
+            else { $argList += "-$k"; $argList += [string]$settings[$k] }
         }
-        Invoke-RunnerProcess $argList | Out-Null
+        $proc = Invoke-RunnerProcess $argList
 
         $log = Get-ChildItem -LiteralPath $logs -Filter *.log | Select-Object -First 1
         [pscustomobject]@{
             Log   = [IO.File]::ReadAllText($log.FullName)
             Calls = [int](Get-Content -LiteralPath (Join-Path $fakeDir 'count'))
             Args  = @(Get-Content -LiteralPath (Join-Path $fakeDir 'args') -Encoding UTF8)
+            ExitCode = $proc.ExitCode
         }
     }
 
@@ -130,6 +132,7 @@ Describe 'claude-autonomous-runner.ps1 end to end' {
         $r.Log | Should -Match 'Stopping: model reports goal complete'
         $r.Args[0..4] -join ' ' | Should -Be '-p --continue --dangerously-skip-permissions --output-format json'
         $r.Args[5] | Should -BeExactly $prompt
+        $r.ExitCode | Should -Be 0
     }
 
     It 'keeps going across turns until done' {
@@ -149,6 +152,7 @@ Describe 'claude-autonomous-runner.ps1 end to end' {
         $r.Calls | Should -Be 1
         $r.Log | Should -Match 'Stopping: usage/rate limit detected\.'
         $r.Log | Should -Match '·'   # UTF-8 survives the round trip
+        $r.ExitCode | Should -Be 2
     }
 
     It 'resumes after a reset that is already due with -WaitForReset' {
@@ -164,17 +168,35 @@ Describe 'claude-autonomous-runner.ps1 end to end' {
         $r = Invoke-Runner -Script @("1`t0`t$banner") -Options @{ WaitForReset = $true }
         $r.Calls | Should -Be 1
         $r.Log | Should -Match 'after the safety deadline'
+        $r.ExitCode | Should -Be 2
     }
 
-    It 'stops when no reset time can be read' {
-        $r = Invoke-Runner -Script @("1`t0`tusage limit reached") -Options @{ WaitForReset = $true }
-        $r.Log | Should -Match 'no reset time could be read'
+    It 'retries a limit that names no reset time, bounded by the failure limit' {
+        $r = Invoke-Runner -Script @("1`t0`tusage limit reached") -Options @{ WaitForReset = $true; FailureLimit = 2 }
+        $r.Calls | Should -Be 2
+        $r.Log | Should -Match 'no readable reset time; retrying after backoff'
+        $r.ExitCode | Should -Be 3
+    }
+
+    It 'recovers from a bare API rate limit with -WaitForReset' {
+        $r = Invoke-Runner -Script @("1`t0`tAPI Error: 429 rate limit exceeded", "0`t0`tDONE-ALL") -Options @{ WaitForReset = $true }
+        $r.Calls | Should -Be 2
+        $r.ExitCode | Should -Be 0
+    }
+
+    It 'stops at the deadline with exit code 4' {
+        # 0.0002 h is under a second; the 2s turn outlives it.
+        $r = Invoke-Runner -Script @("0`t2`tstill working") -Options @{ MaxHours = 0.0002 }
+        $r.Calls | Should -Be 1
+        $r.Log | Should -Match 'safety deadline reached'
+        $r.ExitCode | Should -Be 4
     }
 
     It 'gives up after the configured run of failures' {
         $r = Invoke-Runner -Script @("1`t0`tboom") -Options @{ FailureLimit = 3 }
         $r.Calls | Should -Be 3
         $r.Log | Should -Match 'Stopping: 3 consecutive failed turns'
+        $r.ExitCode | Should -Be 3
     }
 
     It 'resets the failure streak after a good turn' {
@@ -200,6 +222,36 @@ Describe 'claude-autonomous-runner.ps1 end to end' {
         $r.Log | Should -Match 'outcome=Done'
     }
 
+    It 'does not leave a turn running when the runner itself is killed' {
+        [IO.File]::WriteAllText((Join-Path $fakeDir 'script.tsv'), "0`t60`tnever printed`n0`t0`tDONE-ALL`n")
+        foreach ($f in 'count', 'pid') { Remove-Item -LiteralPath (Join-Path $fakeDir $f) -ErrorAction SilentlyContinue }
+        $work = Join-Path $fakeDir 'killed'
+        New-Item -ItemType Directory -Path $work | Out-Null
+        $common = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $runner, '-WorkDir', $work, '-ClaudePath', $fake, '-MaxHours', '1', '-TurnDelaySeconds', '0')
+
+        $first = Invoke-RunnerProcess ($common + @('-LogDir', (Join-Path $work 'a'))) -NoWait
+        $deadline = (Get-Date).AddSeconds(30)
+        while (-not (Test-Path (Join-Path $fakeDir 'pid')) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 200 }
+        Start-Sleep -Milliseconds 500
+        $turnPid = [int](Get-Content -LiteralPath (Join-Path $fakeDir 'pid'))
+        $first.Kill()
+        $first.WaitForExit()
+
+        if ($onWindows) {
+            # The kill-on-close job takes the turn down with the runner.
+            Start-Sleep -Seconds 2
+            Get-Process -Id $turnPid -ErrorAction SilentlyContinue | Should -BeNullOrEmpty
+        }
+
+        # Elsewhere the next runner finds the leftover and kills it.
+        $second = Invoke-RunnerProcess ($common + @('-LogDir', (Join-Path $work 'b')))
+        $second.ExitCode | Should -Be 0
+        Get-Process -Id $turnPid -ErrorAction SilentlyContinue | Should -BeNullOrEmpty
+        if (-not $onWindows) {
+            (Get-Content -Raw (Get-ChildItem (Join-Path $work 'b') -Filter *.log).FullName) | Should -Match "Killing turn $turnPid left running"
+        }
+    }
+
     It 'refuses to run twice against one folder' {
         [IO.File]::WriteAllText((Join-Path $fakeDir 'script.tsv'), "0`t8`tDONE-ALL`n")
         Remove-Item -LiteralPath (Join-Path $fakeDir 'pid') -ErrorAction SilentlyContinue
@@ -211,7 +263,8 @@ Describe 'claude-autonomous-runner.ps1 end to end' {
         $deadline = (Get-Date).AddSeconds(30)
         while (-not (Test-Path (Join-Path $fakeDir 'pid')) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 200 }
 
-        Invoke-RunnerProcess ($common + @('-LogDir', (Join-Path $work 'b'))) | Out-Null
+        $second = Invoke-RunnerProcess ($common + @('-LogDir', (Join-Path $work 'b')))
+        $second.ExitCode | Should -Be 5
         $first.WaitForExit()
 
         (Get-Content -Raw (Get-ChildItem (Join-Path $work 'b') -Filter *.log).FullName) | Should -Match 'Another runner is already active'

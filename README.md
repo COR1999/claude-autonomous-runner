@@ -61,16 +61,33 @@ Options:
 | `-Prompt` | continue-and-report-DONE-ALL | The instruction sent each turn |
 
 Only one runner can work a given folder at a time; a second one logs that and
-exits instead of interleaving turns into the same session.
+exits instead of interleaving turns into the same session. Stopping the runner
+also stops its turn: on Windows the turn sits in a kill-on-close job object, and
+elsewhere the next runner on that folder kills any turn its predecessor left
+running. Each turn logs a `started | pid` line as it begins, so a long turn is
+visibly in progress rather than silent.
 
 With `-WaitForReset` a 5-hour session limit no longer ends the night: the runner
-reads `resets 1:10am` (or `resets Oct 9, 4pm`) from the message, sleeps until
-then, and resumes. A reset that passed in the last 30 minutes counts as due now
-(the server can lag the clock), with retries spaced by `-FailureBackoffSeconds`.
-It still stops if the reset falls after `-MaxHours`, or if no reset time can be
-read.
+reads `resets 1:10am`, `resets Oct 9, 4pm (Europe/Dublin)` or the older
+`usage limit reached|<unix time>` from the message, sleeps until then, and
+resumes. A reset that passed in the last 30 minutes counts as due now (the
+server can lag the clock), with retries spaced by `-FailureBackoffSeconds`. A
+limit with no reset time in it, such as a bare API 429, is retried like a failed
+turn. The run still stops if the reset falls after `-MaxHours`.
 
 Logs land in `<LogDir>\<project>-<start-time>.log`, one file per run.
+
+The exit code says why the run ended, which shows up as Task Scheduler's
+*Last Run Result* or in cron mail:
+
+| Code | Meaning |
+|---|---|
+| `0` | Model reported the goal complete |
+| `1` | The runner itself failed (bad `-WorkDir`, CLI not found, ...) |
+| `2` | Quota limit (without `-WaitForReset`, or the reset is past `-MaxHours`) |
+| `3` | `-FailureLimit` consecutive failed turns |
+| `4` | `-MaxHours` deadline reached |
+| `5` | Another runner already owns this folder |
 
 ## Schedule it overnight
 

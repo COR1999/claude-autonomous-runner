@@ -7,12 +7,15 @@ $script:LimitPattern = '(?i)session limit|usage limit|rate limit|limit reached|l
 
 $script:DoneToken = 'DONE-ALL'
 
-# Reads a redirected pipe on a worker thread, keeping whatever has arrived.
-# ReadToEnd only returns at EOF, and EOF never comes while any descendant
-# (a dev server the model started, say) still holds the pipe open.
-if (-not ('ClaudeRunner.PipeDrain' -as [type])) {
+# PipeDrain reads a redirected pipe on a worker thread, keeping whatever has
+# arrived: ReadToEnd only returns at EOF, and EOF never comes while any
+# descendant (a dev server the model started, say) still holds the pipe open.
+# TurnJob ties a turn's process tree to the runner's lifetime on Windows.
+if (-not ('ClaudeRunner.TurnJob' -as [type])) {
     Add-Type -TypeDefinition @'
+using System;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading.Tasks;
 namespace ClaudeRunner {
@@ -30,6 +33,52 @@ namespace ClaudeRunner {
         }
         public bool Wait(int milliseconds) { return task.Wait(milliseconds); }
         public string Text { get { lock (text) { return text.ToString(); } } }
+    }
+
+    // Windows only. Processes assigned here (and everything they spawn) are
+    // killed by the OS when this process exits, however it exits: the job
+    // handle is never closed explicitly, so it closes with the process.
+    public static class TurnJob {
+        [StructLayout(LayoutKind.Sequential)]
+        struct BasicLimits {
+            public long PerProcessUserTimeLimit, PerJobUserTimeLimit;
+            public uint LimitFlags;
+            public UIntPtr MinimumWorkingSetSize, MaximumWorkingSetSize;
+            public uint ActiveProcessLimit;
+            public UIntPtr Affinity;
+            public uint PriorityClass, SchedulingClass;
+        }
+        [StructLayout(LayoutKind.Sequential)]
+        struct IoCounters { public ulong a, b, c, d, e, f; }
+        [StructLayout(LayoutKind.Sequential)]
+        struct ExtendedLimits {
+            public BasicLimits Basic;
+            public IoCounters Io;
+            public UIntPtr ProcessMemoryLimit, JobMemoryLimit, PeakProcessMemoryUsed, PeakJobMemoryUsed;
+        }
+        const uint KillOnJobClose = 0x2000;
+        const int ExtendedLimitInformation = 9;
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        static extern IntPtr CreateJobObject(IntPtr attributes, string name);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool SetInformationJobObject(IntPtr job, int infoClass, ref ExtendedLimits info, uint length);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+
+        static IntPtr job = IntPtr.Zero;
+
+        public static bool Attach(System.Diagnostics.Process process) {
+            if (job == IntPtr.Zero) {
+                IntPtr created = CreateJobObject(IntPtr.Zero, null);
+                if (created == IntPtr.Zero) return false;
+                var info = new ExtendedLimits();
+                info.Basic.LimitFlags = KillOnJobClose;
+                if (!SetInformationJobObject(created, ExtendedLimitInformation, ref info, (uint)Marshal.SizeOf(info))) return false;
+                job = created;
+            }
+            return AssignProcessToJobObject(job, process.Handle);
+        }
     }
 }
 '@
