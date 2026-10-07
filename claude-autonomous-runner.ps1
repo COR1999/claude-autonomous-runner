@@ -31,7 +31,7 @@ if (-not $claude) { $claude = (Get-Command claude -ErrorAction SilentlyContinue)
 if (-not $claude) { $claude = Join-Path $env:USERPROFILE '.local\bin\claude.exe' }
 if (-not (Test-Path -LiteralPath $claude)) { throw "claude executable not found: $claude" }
 
-function Write-Log([string]$Message) {
+function Write-RunnerLog([string]$Message) {
     Add-Content -LiteralPath $logFile -Encoding UTF8 -Value ("[{0}] {1}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Message)
 }
 
@@ -64,7 +64,7 @@ function Invoke-ClaudeTurn {
 
     $timeoutMs = if ($TurnTimeoutMinutes -gt 0) { $TurnTimeoutMinutes * 60000 } else { -1 }
     if (-not $proc.WaitForExit($timeoutMs)) {
-        Write-Log "Turn exceeded ${TurnTimeoutMinutes} minutes; killing process tree $($proc.Id)."
+        Write-RunnerLog "Turn exceeded ${TurnTimeoutMinutes} minutes; killing process tree $($proc.Id)."
         & taskkill.exe /T /F /PID $proc.Id 2>&1 | Out-Null
         $proc.WaitForExit()
         $text = "Turn timed out after $TurnTimeoutMinutes minutes.`r`n" + $stdout.Result + $stderr.Result
@@ -96,7 +96,7 @@ try {
     $ownsMutex = $true
 }
 if (-not $ownsMutex) {
-    Write-Log "=== Another runner is already active for $WorkDir; exiting. ==="
+    Write-RunnerLog "=== Another runner is already active for $WorkDir; exiting. ==="
     return
 }
 
@@ -106,11 +106,11 @@ try {
     $consecutiveFailures = 0
     $turnCount = 0
 
-    Write-Log "=== Runner started | workdir: $WorkDir | max hours: $MaxHours | wait for reset: $([bool]$WaitForReset) ==="
+    Write-RunnerLog "=== Runner started | workdir: $WorkDir | max hours: $MaxHours | wait for reset: $([bool]$WaitForReset) ==="
 
     while ($true) {
         if ((Get-Date) -ge $deadline) {
-            Write-Log "Stopping: ${MaxHours}-hour safety deadline reached."
+            Write-RunnerLog "Stopping: ${MaxHours}-hour safety deadline reached."
             break
         }
 
@@ -118,29 +118,29 @@ try {
         $turnCount++
         $outcome = Get-TurnOutcome $turn
 
-        Write-Log ("--- turn {0} | {1} ---`r`n{2}" -f $turnCount, (Format-TurnSummary $turn $outcome), $turn.Result)
+        Write-RunnerLog ("--- turn {0} | {1} ---`r`n{2}" -f $turnCount, (Format-TurnSummary $turn $outcome), $turn.Result)
 
         if ($outcome -eq 'Done') {
-            Write-Log "Stopping: model reports goal complete."
+            Write-RunnerLog "Stopping: model reports goal complete."
             break
         }
 
         if ($outcome -eq 'Limit') {
             if (-not $WaitForReset) {
-                Write-Log "Stopping: usage/rate limit detected."
+                Write-RunnerLog "Stopping: usage/rate limit detected."
                 break
             }
             $resetAt = Get-LimitResetTime $turn.Result
             if (-not $resetAt) {
-                Write-Log "Stopping: usage/rate limit detected, but no reset time could be read from it."
+                Write-RunnerLog "Stopping: usage/rate limit detected, but no reset time could be read from it."
                 break
             }
             $resumeAt = $resetAt.AddMinutes($ResetBufferMinutes)
             if ($resumeAt -ge $deadline) {
-                Write-Log ("Stopping: limit resets at {0:yyyy-MM-dd HH:mm}, after the safety deadline." -f $resetAt)
+                Write-RunnerLog ("Stopping: limit resets at {0:yyyy-MM-dd HH:mm}, after the safety deadline." -f $resetAt)
                 break
             }
-            Write-Log ("Limit hit; sleeping until {0:yyyy-MM-dd HH:mm}." -f $resumeAt)
+            Write-RunnerLog ("Limit hit; sleeping until {0:yyyy-MM-dd HH:mm}." -f $resumeAt)
             Wait-Until $resumeAt
             $consecutiveFailures = 0
             continue
@@ -148,9 +148,9 @@ try {
 
         if ($outcome -eq 'Failure') {
             $consecutiveFailures++
-            Write-Log "Failed turn, failure streak: $consecutiveFailures"
+            Write-RunnerLog "Failed turn, failure streak: $consecutiveFailures"
             if ($consecutiveFailures -ge $FailureLimit) {
-                Write-Log "Stopping: $FailureLimit consecutive failed turns."
+                Write-RunnerLog "Stopping: $FailureLimit consecutive failed turns."
                 break
             }
             Start-Sleep -Seconds $FailureBackoffSeconds
@@ -161,7 +161,7 @@ try {
         Start-Sleep -Seconds $TurnDelaySeconds
     }
 
-    Write-Log "=== Runner exited | turns: $turnCount ==="
+    Write-RunnerLog "=== Runner exited | turns: $turnCount ==="
 } finally {
     $mutex.ReleaseMutex()
     $mutex.Dispose()
